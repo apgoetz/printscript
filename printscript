@@ -1,0 +1,221 @@
+#!/usr/bin/perl
+# Printer Script
+#AUTHOR: Andy Goetz
+
+
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+
+use WWW::Mechanize;		    # used to download some pages
+use JSON -support_by_pp;	    # used to parse reddit's posts
+use Image::Info qw(image_info dim); # used to determine the dimensions of pics
+use Getopt::Long;		# used to parse command line options
+
+
+
+
+use strict;
+my $screenwidth = 1440;		#the width of the wallpaper you want
+my $screenheight = 900;		# the height
+my $screenepsilon = 100; #number of pixels you don't mind it being off by
+my $ratioepsilon = 0.3; # amount of the ratio you don't mind it being off by
+my $cachefile = $ENV{HOME}."/.namefile"; #file containing list of images that have already been tried
+my $screenratio = $screenwidth/$screenheight;
+
+#list of printers to print to when script is called
+my @default_printers = ('fab5517bw1',
+			'fab5517bw2',
+			'fab6001bw1',
+			'fab8201bw1',
+			'fab6019bw1');
+
+# default list of subreddits to search
+my @pornos = ("earthporn",
+	      "villageporn",
+	      "cityporn",
+	      "botanicalporn",
+	      "naturepics",
+	      "animalporn",
+	      "wallpaper",
+	      "wallpapers",
+	      "spaceporn",
+	     );
+
+
+# Actually prints out the created ps file
+sub print_image {
+  my    $printer = shift;
+
+  my $PRINT_CMD = "lpr -o media=Letter -P $printer output.ps";
+  print "Printing to printer $printer\n";
+  system($PRINT_CMD);
+}
+
+  # check if the image name has already been tested
+  sub ischecked {
+    my $name = shift;
+    my $grepval = `grep $name $cachefile`;
+    my $result = "$grepval" ne "";
+    return $result;
+    
+  }
+
+# Add an image to the list of tested images
+sub addtocache {
+  my $imgname = shift;
+    
+  if (ischecked($imgname)) {
+	
+    return;
+  }
+  open(FH, ">>", "$cachefile") or die ("cannot open $cachefile");
+  print FH $imgname."\n";
+  close FH;
+}
+
+
+
+#returns an array of post urls, for a given url
+sub fetch_json_page {
+  my ($json_url) = shift;
+  my @urls;
+  my $browser = WWW::Mechanize->new();
+  eval {
+    # download the json page:
+    print "Getting json $json_url\n";
+    $browser->get( $json_url );
+    my $content = $browser->content();
+    my $json = new JSON;
+    
+    # these are some nice json options to relax restrictions a bit:
+    my $json_text = $json->allow_nonref->utf8->relaxed->escape_slash->loose->allow_singlequote->allow_barekey->decode($content);
+
+    
+    foreach my $post (@{$json_text->{data}->{children}}) {
+      # filter out nsfw images
+      if (!$post->{data}->{over_18}) {
+	push @urls, $post->{data}->{url};
+      }
+    }
+  };
+  # catch crashes:
+  if ($@ or scalar(@urls) == 0) {
+    die;
+  }
+
+  return @urls;
+}
+
+    
+#determine if a given file is a good candidate for a wallpaper based
+#on its height and width
+
+sub fitfails {
+	
+  my $info = image_info(shift);
+    
+  if (my $error = $info->{error}) {
+    die "Image::Info error: $error\n";
+  }
+    
+  my $width = $info->{width};
+  my $height = $info->{height};
+  my $ratio = $width/$height;
+  print "w: ".$width." h: ".$height." r: ".$ratio."\n";
+  return (($ratio < $screenratio - $ratioepsilon)  or
+	  ($ratio > $screenratio + $ratioepsilon)  or
+	  ($width < $screenwidth - $screenepsilon) or
+	  ($height < $screenheight - $screenepsilon));
+}
+
+
+# START OF SCRIPT
+
+# actual subreddit to check
+my $subreddit = '';
+# should printscript use the default list of printers?
+my $usedefault = '';
+
+
+GetOptions('subreddit=s' => \$subreddit,
+	   'default' => \$usedefault);
+
+# by default, use remaining args as printer list
+my @printers= @ARGV;
+
+
+# if the -d flag is passed, use the default list of printers
+if ($usedefault) {
+  @printers = @default_printers;
+}
+
+#subreddit is the randomly picked subreddit to steal the pic from
+if (!$subreddit) {
+  $subreddit = $pornos[ rand(scalar @pornos)];
+}
+
+
+# we need to get the latest version of the page. If it already exists
+# locally, we must delete it.
+
+my @urls;
+eval {
+  @urls = fetch_json_page("http://reddit.com/r/".$subreddit.".json");
+  1;
+} or die("Could not fetch the reddit URL http://reddit.com/r/".$subreddit.".json");
+
+
+foreach my $url (@urls) {
+  print "trying $url\n";
+  if ($url =~ /(png)|(jpg)|(jpeg)$/ ) {
+    # pull out the last bit of the path. This is the filename wget
+    # will use.
+    my @splitname = split('/', $url);
+    my $filename = $splitname[-1];
+    # if the file does not exist, we can download it.
+    if (( !ischecked($filename)) && $url !~ /\?/) {
+      system("wget", "-q",  $url);
+      addtocache($filename);
+
+      if (fitfails($filename)) {
+	unlink($filename);
+	next;
+      }
+
+
+      my $date = `date`;
+      chomp($date);
+      my $label = $date." | Andy Goetz | ".$url;
+
+      system("convert $filename  -colorspace Gray -rotate -90 -resize 550x712  label:'$label' +swap  -append output.ps  ");
+
+      unlink("$filename");
+
+      print("downloaded and using $filename\n");
+
+      if (scalar @printers == 0) {
+	print "No printers provided and --default not specified.\n";
+      } else {
+	foreach my $printer (@printers) {
+	  print_image($printer);
+	}
+      }
+      unlink("output.ps");
+      exit 0;
+    }
+  }
+
+}
+
+print "Could not find an appropriate picture\n";
